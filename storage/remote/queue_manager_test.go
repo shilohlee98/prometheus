@@ -273,33 +273,37 @@ func TestSampleDelivery(t *testing.T) {
 
 				qm.StoreSeries(series, 0)
 				qm.StoreMetadata(metadata)
+				sampleMid := len(samples) / 2
+				exemplarMid := len(exemplars) / 2
+				histogramMid := len(histograms) / 2
+				floatHistogramMid := len(floatHistograms) / 2
 
 				// Send first half of data.
-				c.expectSamples(samples[:len(samples)/2], series)
-				c.expectExemplars(exemplars[:len(exemplars)/2], series)
-				c.expectHistograms(histograms[:len(histograms)/2], series)
-				c.expectFloatHistograms(floatHistograms[:len(floatHistograms)/2], series)
+				c.expectSamples(samples[:sampleMid], series)
+				c.expectExemplars(exemplars[:exemplarMid], series)
+				c.expectHistograms(histograms[:histogramMid], series)
+				c.expectFloatHistograms(floatHistograms[:floatHistogramMid], series)
 				if protoMsg == remoteapi.WriteV2MessageType && len(metadata) > 0 {
-					c.expectMetadataForBatch(metadata, series, samples[:len(samples)/2], exemplars[:len(exemplars)/2], histograms[:len(histograms)/2], floatHistograms[:len(floatHistograms)/2])
+					c.expectMetadataForBatch(metadata, series, samples[:sampleMid], exemplars[:exemplarMid], histograms[:histogramMid], floatHistograms[:floatHistogramMid])
 				}
-				qm.Append(samples[:len(samples)/2])
-				qm.AppendExemplars(exemplars[:len(exemplars)/2])
-				qm.AppendHistograms(histograms[:len(histograms)/2])
-				qm.AppendFloatHistograms(floatHistograms[:len(floatHistograms)/2])
+				qm.Append(samples[:sampleMid])
+				qm.AppendExemplars(exemplars[:exemplarMid])
+				qm.AppendHistograms(histograms[:histogramMid])
+				qm.AppendFloatHistograms(floatHistograms[:floatHistogramMid])
 				c.waitForExpectedData(t, 30*time.Second)
 
 				// Send second half of data.
-				c.expectSamples(samples[len(samples)/2:], series)
-				c.expectExemplars(exemplars[len(exemplars)/2:], series)
-				c.expectHistograms(histograms[len(histograms)/2:], series)
-				c.expectFloatHistograms(floatHistograms[len(floatHistograms)/2:], series)
+				c.expectSamples(samples[sampleMid:], series)
+				c.expectExemplars(exemplars[exemplarMid:], series)
+				c.expectHistograms(histograms[histogramMid:], series)
+				c.expectFloatHistograms(floatHistograms[floatHistogramMid:], series)
 				if protoMsg == remoteapi.WriteV2MessageType && len(metadata) > 0 {
-					c.expectMetadataForBatch(metadata, series, samples[len(samples)/2:], exemplars[len(exemplars)/2:], histograms[len(histograms)/2:], floatHistograms[len(floatHistograms)/2:])
+					c.expectMetadataForBatch(metadata, series, samples[sampleMid:], exemplars[exemplarMid:], histograms[histogramMid:], floatHistograms[floatHistogramMid:])
 				}
-				qm.Append(samples[len(samples)/2:])
-				qm.AppendExemplars(exemplars[len(exemplars)/2:])
-				qm.AppendHistograms(histograms[len(histograms)/2:])
-				qm.AppendFloatHistograms(floatHistograms[len(floatHistograms)/2:])
+				qm.Append(samples[sampleMid:])
+				qm.AppendExemplars(exemplars[exemplarMid:])
+				qm.AppendHistograms(histograms[histogramMid:])
+				qm.AppendFloatHistograms(floatHistograms[floatHistogramMid:])
 				c.waitForExpectedData(t, 30*time.Second)
 
 				// Ensure the queue metrics match what was sent
