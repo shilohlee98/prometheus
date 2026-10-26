@@ -425,6 +425,27 @@ func TestWALMetadataDelivery(t *testing.T) {
 	require.Equal(t, int64(len(recs.Samples)), qm.dataOut.newEvents.Load())
 }
 
+func TestWALMetadataDeliverySkipsDroppedSeries(t *testing.T) {
+	const n = 3
+	recs := testwal.GenerateRecords(recCase{Series: n})
+	qm := newTestQueueManager(t, testDefaultQueueConfig(), config.DefaultMetadataConfig, defaultFlushDeadline, NewTestWriteClient(remoteapi.WriteV2MessageType), remoteapi.WriteV2MessageType)
+	qm.relabelConfigs = []*relabel.Config{{
+		SourceLabels:         model.LabelNames{model.MetricNameLabel},
+		Regex:                relabel.MustNewRegexp("test_metric_0"),
+		Action:               relabel.Drop,
+		NameValidationScheme: model.UTF8Validation,
+	}}
+
+	qm.StoreSeries(recs.Series, 0)
+	qm.StoreMetadata(recs.Metadata)
+
+	droppedRef := recs.Metadata[0].Ref
+	require.Contains(t, qm.droppedSeries, droppedRef)
+	require.NotContains(t, qm.seriesMetadata, droppedRef)
+	require.Len(t, qm.seriesMetadata, n-1)
+	require.Equal(t, float64(n-1), client_testutil.ToFloat64(qm.metrics.walMetadataReceivedTotal))
+}
+
 func TestSampleDeliveryTimeout(t *testing.T) {
 	t.Parallel()
 	for _, protoMsg := range []remoteapi.WriteMessageType{remoteapi.WriteV1MessageType, remoteapi.WriteV2MessageType} {

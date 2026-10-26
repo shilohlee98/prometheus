@@ -1382,14 +1382,19 @@ func (t *QueueManager) StoreMetadata(meta []record.RefMetadata) {
 
 	t.seriesMtx.Lock()
 	defer t.seriesMtx.Unlock()
+	stored := 0
 	for _, m := range meta {
+		if _, dropped := t.droppedSeries[m.Ref]; dropped {
+			continue
+		}
 		t.seriesMetadata[m.Ref] = unique.Make(metadata.Metadata{
 			Type: record.ToMetricType(m.Type),
 			Unit: m.Unit,
 			Help: m.Help,
 		})
+		stored++
 	}
-	t.metrics.walMetadataReceivedTotal.Add(float64(len(meta)))
+	t.metrics.walMetadataReceivedTotal.Add(float64(stored))
 }
 
 // UpdateSeriesSegment updates the segment number held against the series,
