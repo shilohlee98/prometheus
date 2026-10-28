@@ -207,6 +207,8 @@ func TestBasicContentNegotiation(t *testing.T) {
 					require.Equal(t, float64(attempts), client_testutil.ToFloat64(qm.metrics.samplesMetadataTotal.WithLabelValues(metadata)), metadata)
 					require.Equal(t, 0.0, client_testutil.ToFloat64(qm.metrics.histogramsMetadataTotal.WithLabelValues(metadata)), metadata)
 				}
+				require.Equal(t, float64(attempts), client_testutil.ToFloat64(qm.metrics.samplesMetadataSourceTotal.WithLabelValues(metadataSourceWAL)))
+				require.Equal(t, 0.0, client_testutil.ToFloat64(qm.metrics.histogramsMetadataSourceTotal.WithLabelValues(metadataSourceWAL)))
 			}
 		})
 	}
@@ -311,6 +313,8 @@ func TestSampleDelivery(t *testing.T) {
 						require.Equal(t, float64(len(samples)), client_testutil.ToFloat64(qm.metrics.samplesMetadataTotal.WithLabelValues(metadata)), metadata)
 						require.Equal(t, float64(len(histograms)+len(floatHistograms)), client_testutil.ToFloat64(qm.metrics.histogramsMetadataTotal.WithLabelValues(metadata)), metadata)
 					}
+					require.Equal(t, float64(len(samples)), client_testutil.ToFloat64(qm.metrics.samplesMetadataSourceTotal.WithLabelValues(metadataSourceWAL)))
+					require.Equal(t, float64(len(histograms)+len(floatHistograms)), client_testutil.ToFloat64(qm.metrics.histogramsMetadataSourceTotal.WithLabelValues(metadataSourceWAL)))
 				}
 				var durationMetric dto.Metric
 				require.NoError(t, qm.metrics.sentBatchDuration.Write(&durationMetric))
@@ -2022,6 +2026,8 @@ func TestQueueManagerMetrics(t *testing.T) {
 	rw2MetadataMetricNames := []string{
 		"prometheus_remote_storage_samples_metadata_total",
 		"prometheus_remote_storage_histograms_metadata_total",
+		"prometheus_remote_storage_samples_metadata_source_total",
+		"prometheus_remote_storage_histograms_metadata_source_total",
 	}
 
 	for _, tc := range []struct {
@@ -2068,10 +2074,11 @@ func TestQueueManagerMetrics(t *testing.T) {
 
 func TestV2DataWithMetadataMetrics(t *testing.T) {
 	for _, tc := range []struct {
-		name               string
-		timeSeries         []writev2.TimeSeries
-		expectedSamples    metadataFieldCounts
-		expectedHistograms metadataFieldCounts
+		name                    string
+		timeSeries              []writev2.TimeSeries
+		enableTypeAndUnitLabels bool
+		expectedSamples         metadataCounts
+		expectedHistograms      metadataCounts
 	}{
 		{
 			name: "without metadata",
@@ -2081,31 +2088,42 @@ func TestV2DataWithMetadataMetrics(t *testing.T) {
 			}},
 		},
 		{
-			name: "with type",
+			name: "type from WAL",
 			timeSeries: []writev2.TimeSeries{{
 				Samples:  make([]writev2.Sample, 1),
 				Metadata: writev2.Metadata{Type: writev2.Metadata_METRIC_TYPE_COUNTER},
 			}},
-			expectedSamples: metadataFieldCounts{typ: 1},
+			expectedSamples: metadataCounts{
+				fields:  metadataFieldCounts{typ: 1},
+				sources: metadataSourceCounts{wal: 1},
+			},
 		},
 		{
-			name: "with unit",
+			name: "unit from type-and-unit labels",
 			timeSeries: []writev2.TimeSeries{{
 				Histograms: make([]writev2.Histogram, 1),
 				Metadata:   writev2.Metadata{UnitRef: 1},
 			}},
-			expectedHistograms: metadataFieldCounts{unit: 1},
+			enableTypeAndUnitLabels: true,
+			expectedHistograms: metadataCounts{
+				fields:  metadataFieldCounts{unit: 1},
+				sources: metadataSourceCounts{typeAndUnitLabels: 1},
+			},
 		},
 		{
-			name: "with help",
+			name: "help from WAL with type-and-unit labels enabled",
 			timeSeries: []writev2.TimeSeries{{
 				Samples:  make([]writev2.Sample, 1),
 				Metadata: writev2.Metadata{HelpRef: 1},
 			}},
-			expectedSamples: metadataFieldCounts{help: 1},
+			enableTypeAndUnitLabels: true,
+			expectedSamples: metadataCounts{
+				fields:  metadataFieldCounts{help: 1},
+				sources: metadataSourceCounts{wal: 1},
+			},
 		},
 		{
-			name: "with all metadata",
+			name: "all metadata from WAL",
 			timeSeries: []writev2.TimeSeries{{
 				Samples:    make([]writev2.Sample, 2),
 				Histograms: make([]writev2.Histogram, 1),
@@ -2115,8 +2133,41 @@ func TestV2DataWithMetadataMetrics(t *testing.T) {
 					HelpRef: 2,
 				},
 			}},
-			expectedSamples:    metadataFieldCounts{typ: 2, unit: 2, help: 2},
-			expectedHistograms: metadataFieldCounts{typ: 1, unit: 1, help: 1},
+			expectedSamples: metadataCounts{
+				fields:  metadataFieldCounts{typ: 2, unit: 2, help: 2},
+				sources: metadataSourceCounts{wal: 2},
+			},
+			expectedHistograms: metadataCounts{
+				fields:  metadataFieldCounts{typ: 1, unit: 1, help: 1},
+				sources: metadataSourceCounts{wal: 1},
+			},
+		},
+		{
+			name: "mixed sources",
+			timeSeries: []writev2.TimeSeries{{
+				Samples:    make([]writev2.Sample, 2),
+				Histograms: make([]writev2.Histogram, 1),
+				Metadata: writev2.Metadata{
+					Type:    writev2.Metadata_METRIC_TYPE_COUNTER,
+					UnitRef: 1,
+					HelpRef: 2,
+				},
+			}},
+			enableTypeAndUnitLabels: true,
+			expectedSamples: metadataCounts{
+				fields: metadataFieldCounts{typ: 2, unit: 2, help: 2},
+				sources: metadataSourceCounts{
+					wal:               2,
+					typeAndUnitLabels: 2,
+				},
+			},
+			expectedHistograms: metadataCounts{
+				fields: metadataFieldCounts{typ: 1, unit: 1, help: 1},
+				sources: metadataSourceCounts{
+					wal:               1,
+					typeAndUnitLabels: 1,
+				},
+			},
 		},
 		{
 			name: "exemplars are ignored",
@@ -2133,14 +2184,18 @@ func TestV2DataWithMetadataMetrics(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			metrics := newQueueManagerMetrics(nil, "", "")
 			updater := batchMetricsUpdater{metrics: metrics}
-			updater.recordV2WithMetadataAttempt(countV2DataWithMetadata(tc.timeSeries))
+			updater.recordV2WithMetadataAttempt(countV2DataWithMetadata(tc.timeSeries, tc.enableTypeAndUnitLabels))
 
-			require.Equal(t, float64(tc.expectedSamples.typ), client_testutil.ToFloat64(metrics.samplesMetadataTotal.WithLabelValues(metadataFieldType)))
-			require.Equal(t, float64(tc.expectedSamples.unit), client_testutil.ToFloat64(metrics.samplesMetadataTotal.WithLabelValues(metadataFieldUnit)))
-			require.Equal(t, float64(tc.expectedSamples.help), client_testutil.ToFloat64(metrics.samplesMetadataTotal.WithLabelValues(metadataFieldHelp)))
-			require.Equal(t, float64(tc.expectedHistograms.typ), client_testutil.ToFloat64(metrics.histogramsMetadataTotal.WithLabelValues(metadataFieldType)))
-			require.Equal(t, float64(tc.expectedHistograms.unit), client_testutil.ToFloat64(metrics.histogramsMetadataTotal.WithLabelValues(metadataFieldUnit)))
-			require.Equal(t, float64(tc.expectedHistograms.help), client_testutil.ToFloat64(metrics.histogramsMetadataTotal.WithLabelValues(metadataFieldHelp)))
+			require.Equal(t, float64(tc.expectedSamples.fields.typ), client_testutil.ToFloat64(metrics.samplesMetadataTotal.WithLabelValues(metadataFieldType)))
+			require.Equal(t, float64(tc.expectedSamples.fields.unit), client_testutil.ToFloat64(metrics.samplesMetadataTotal.WithLabelValues(metadataFieldUnit)))
+			require.Equal(t, float64(tc.expectedSamples.fields.help), client_testutil.ToFloat64(metrics.samplesMetadataTotal.WithLabelValues(metadataFieldHelp)))
+			require.Equal(t, float64(tc.expectedHistograms.fields.typ), client_testutil.ToFloat64(metrics.histogramsMetadataTotal.WithLabelValues(metadataFieldType)))
+			require.Equal(t, float64(tc.expectedHistograms.fields.unit), client_testutil.ToFloat64(metrics.histogramsMetadataTotal.WithLabelValues(metadataFieldUnit)))
+			require.Equal(t, float64(tc.expectedHistograms.fields.help), client_testutil.ToFloat64(metrics.histogramsMetadataTotal.WithLabelValues(metadataFieldHelp)))
+			require.Equal(t, float64(tc.expectedSamples.sources.wal), client_testutil.ToFloat64(metrics.samplesMetadataSourceTotal.WithLabelValues(metadataSourceWAL)))
+			require.Equal(t, float64(tc.expectedSamples.sources.typeAndUnitLabels), client_testutil.ToFloat64(metrics.samplesMetadataSourceTotal.WithLabelValues(metadataSourceTypeAndUnitLabels)))
+			require.Equal(t, float64(tc.expectedHistograms.sources.wal), client_testutil.ToFloat64(metrics.histogramsMetadataSourceTotal.WithLabelValues(metadataSourceWAL)))
+			require.Equal(t, float64(tc.expectedHistograms.sources.typeAndUnitLabels), client_testutil.ToFloat64(metrics.histogramsMetadataSourceTotal.WithLabelValues(metadataSourceTypeAndUnitLabels)))
 		})
 	}
 }

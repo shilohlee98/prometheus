@@ -104,8 +104,10 @@ type queueManagerMetrics struct {
 	metadataBytesTotal     prometheus.Counter
 	maxSamplesPerSend      prometheus.Gauge
 
-	samplesMetadataTotal    *prometheus.CounterVec
-	histogramsMetadataTotal *prometheus.CounterVec
+	samplesMetadataTotal          *prometheus.CounterVec
+	histogramsMetadataTotal       *prometheus.CounterVec
+	samplesMetadataSourceTotal    *prometheus.CounterVec
+	histogramsMetadataSourceTotal *prometheus.CounterVec
 }
 
 func newQueueManagerMetrics(r prometheus.Registerer, rn, e string) *queueManagerMetrics {
@@ -131,6 +133,13 @@ func newQueueManagerMetrics(r prometheus.Registerer, rn, e string) *queueManager
 		Help:        "Total number of samples sent to remote storage using Remote Write 2.0 with the specified metadata field set.",
 		ConstLabels: constLabels,
 	}, []string{"field"})
+	m.samplesMetadataSourceTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace:   namespace,
+		Subsystem:   subsystem,
+		Name:        "samples_metadata_source_total",
+		Help:        "Total number of samples sent to remote storage using Remote Write 2.0 with at least one metadata field obtained from the specified source.",
+		ConstLabels: constLabels,
+	}, []string{"source"})
 	m.exemplarsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace:   namespace,
 		Subsystem:   subsystem,
@@ -152,9 +161,20 @@ func newQueueManagerMetrics(r prometheus.Registerer, rn, e string) *queueManager
 		Help:        "Total number of histograms sent to remote storage using Remote Write 2.0 with the specified metadata field set.",
 		ConstLabels: constLabels,
 	}, []string{"field"})
+	m.histogramsMetadataSourceTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace:   namespace,
+		Subsystem:   subsystem,
+		Name:        "histograms_metadata_source_total",
+		Help:        "Total number of histograms sent to remote storage using Remote Write 2.0 with at least one metadata field obtained from the specified source.",
+		ConstLabels: constLabels,
+	}, []string{"source"})
 	for _, field := range []string{metadataFieldType, metadataFieldUnit, metadataFieldHelp} {
 		m.samplesMetadataTotal.WithLabelValues(field)
 		m.histogramsMetadataTotal.WithLabelValues(field)
+	}
+	for _, source := range []string{metadataSourceWAL, metadataSourceTypeAndUnitLabels} {
+		m.samplesMetadataSourceTotal.WithLabelValues(source)
+		m.histogramsMetadataSourceTotal.WithLabelValues(source)
 	}
 	m.metadataTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace:   namespace,
@@ -398,6 +418,8 @@ func (m *queueManagerMetrics) register(protoMsg remoteapi.WriteMessageType) {
 			m.reg.MustRegister(
 				m.samplesMetadataTotal,
 				m.histogramsMetadataTotal,
+				m.samplesMetadataSourceTotal,
+				m.histogramsMetadataSourceTotal,
 			)
 		}
 	}
@@ -439,6 +461,8 @@ func (m *queueManagerMetrics) unregister(protoMsg remoteapi.WriteMessageType) {
 		} else {
 			m.reg.Unregister(m.samplesMetadataTotal)
 			m.reg.Unregister(m.histogramsMetadataTotal)
+			m.reg.Unregister(m.samplesMetadataSourceTotal)
+			m.reg.Unregister(m.histogramsMetadataSourceTotal)
 		}
 	}
 }
@@ -2222,7 +2246,7 @@ func (s *shards) sendV2SamplesWithBackoff(ctx context.Context, samples []writev2
 	metricsUpdater := batchMetricsUpdater{
 		metrics: s.qm.metrics,
 	}
-	withMetadataCounts := countV2DataWithMetadata(samples)
+	withMetadataCounts := countV2DataWithMetadata(samples, s.qm.enableTypeAndUnitLabels)
 
 	// Since we retry writes via attemptStore and sendWriteRequestWithBackoff we need
 	// to track the total amount of accepted data across the various attempts.
@@ -2638,6 +2662,9 @@ const (
 	metadataFieldType = "type"
 	metadataFieldUnit = "unit"
 	metadataFieldHelp = "help"
+
+	metadataSourceWAL               = "wal"
+	metadataSourceTypeAndUnitLabels = "type-and-unit-labels"
 )
 
 type metadataFieldCounts struct {
@@ -2646,28 +2673,56 @@ type metadataFieldCounts struct {
 	help int
 }
 
-type v2WithMetadataCounts struct {
-	samples    metadataFieldCounts
-	histograms metadataFieldCounts
+type metadataSourceCounts struct {
+	wal               int
+	typeAndUnitLabels int
 }
 
-func countV2DataWithMetadata(timeSeries []writev2.TimeSeries) v2WithMetadataCounts {
-	var counts v2WithMetadataCounts
+type metadataCounts struct {
+	fields  metadataFieldCounts
+	sources metadataSourceCounts
+}
+
+type v2MetadataCounts struct {
+	samples    metadataCounts
+	histograms metadataCounts
+}
+
+func countV2DataWithMetadata(timeSeries []writev2.TimeSeries, enableTypeAndUnitLabels bool) v2MetadataCounts {
+	var counts v2MetadataCounts
 	for _, ts := range timeSeries {
 		sampleCount := len(ts.Samples)
 		histogramCount := len(ts.Histograms)
 
-		if ts.Metadata.Type != writev2.Metadata_METRIC_TYPE_UNSPECIFIED {
-			counts.samples.typ += sampleCount
-			counts.histograms.typ += histogramCount
+		hasType := ts.Metadata.Type != writev2.Metadata_METRIC_TYPE_UNSPECIFIED
+		hasUnit := ts.Metadata.UnitRef != 0
+		hasHelp := ts.Metadata.HelpRef != 0
+
+		if hasType {
+			counts.samples.fields.typ += sampleCount
+			counts.histograms.fields.typ += histogramCount
 		}
-		if ts.Metadata.UnitRef != 0 {
-			counts.samples.unit += sampleCount
-			counts.histograms.unit += histogramCount
+		if hasUnit {
+			counts.samples.fields.unit += sampleCount
+			counts.histograms.fields.unit += histogramCount
 		}
-		if ts.Metadata.HelpRef != 0 {
-			counts.samples.help += sampleCount
-			counts.histograms.help += histogramCount
+		if hasHelp {
+			counts.samples.fields.help += sampleCount
+			counts.histograms.fields.help += histogramCount
+		}
+
+		if enableTypeAndUnitLabels {
+			if hasType || hasUnit {
+				counts.samples.sources.typeAndUnitLabels += sampleCount
+				counts.histograms.sources.typeAndUnitLabels += histogramCount
+			}
+			if hasHelp {
+				counts.samples.sources.wal += sampleCount
+				counts.histograms.sources.wal += histogramCount
+			}
+		} else if hasType || hasUnit || hasHelp {
+			counts.samples.sources.wal += sampleCount
+			counts.histograms.sources.wal += histogramCount
 		}
 	}
 	return counts
@@ -2680,13 +2735,22 @@ func (b *batchMetricsUpdater) recordBatchAttempt(sc sendBatchContext) {
 	b.metrics.histogramsTotal.Add(float64(sc.histogramCount))
 }
 
-func (b *batchMetricsUpdater) recordV2WithMetadataAttempt(counts v2WithMetadataCounts) {
-	b.metrics.samplesMetadataTotal.WithLabelValues(metadataFieldType).Add(float64(counts.samples.typ))
-	b.metrics.samplesMetadataTotal.WithLabelValues(metadataFieldUnit).Add(float64(counts.samples.unit))
-	b.metrics.samplesMetadataTotal.WithLabelValues(metadataFieldHelp).Add(float64(counts.samples.help))
-	b.metrics.histogramsMetadataTotal.WithLabelValues(metadataFieldType).Add(float64(counts.histograms.typ))
-	b.metrics.histogramsMetadataTotal.WithLabelValues(metadataFieldUnit).Add(float64(counts.histograms.unit))
-	b.metrics.histogramsMetadataTotal.WithLabelValues(metadataFieldHelp).Add(float64(counts.histograms.help))
+func (b *batchMetricsUpdater) recordV2WithMetadataAttempt(counts v2MetadataCounts) {
+	recordMetadataFieldCounts(b.metrics.samplesMetadataTotal, counts.samples.fields)
+	recordMetadataFieldCounts(b.metrics.histogramsMetadataTotal, counts.histograms.fields)
+	recordMetadataSourceCounts(b.metrics.samplesMetadataSourceTotal, counts.samples.sources)
+	recordMetadataSourceCounts(b.metrics.histogramsMetadataSourceTotal, counts.histograms.sources)
+}
+
+func recordMetadataFieldCounts(metric *prometheus.CounterVec, counts metadataFieldCounts) {
+	metric.WithLabelValues(metadataFieldType).Add(float64(counts.typ))
+	metric.WithLabelValues(metadataFieldUnit).Add(float64(counts.unit))
+	metric.WithLabelValues(metadataFieldHelp).Add(float64(counts.help))
+}
+
+func recordMetadataSourceCounts(metric *prometheus.CounterVec, counts metadataSourceCounts) {
+	metric.WithLabelValues(metadataSourceWAL).Add(float64(counts.wal))
+	metric.WithLabelValues(metadataSourceTypeAndUnitLabels).Add(float64(counts.typeAndUnitLabels))
 }
 
 // recordLatency records the observed send duration for a batch attempt.
